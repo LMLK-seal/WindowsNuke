@@ -1,4 +1,4 @@
-# 🗂️ WindowsNuke Windows Remover for secondary Drive
+# 🗂️ WindowsNuke Windows Remover tool for secondary Drive
 
 [![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
