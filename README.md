@@ -1,4 +1,4 @@
-# 🗂️ Secondary Drive Windows Remover
+# 🗂️ WindowsNuke Windows Remover for secondary Drive
 
 [![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -7,7 +7,7 @@
 
 WindowsNuke safely remove Windows installations from secondary drives, helping you reclaim valuable storage space after system migrations.
 
-![Application Screenshot](screenshot.png)
+![Application logo](https://github.com/LMLK-seal/WindowsNuke/blob/main/WindowsNukeLogo.png?raw=true)
 
 ## 🎯 Purpose
 
@@ -42,6 +42,10 @@ When upgrading to a larger SSD and keeping your old drive as secondary storage, 
 - **Confirmation Dialogs**: Multiple verification steps before deletion
 - **Error Handling**: Graceful handling of permission and access errors
 - **Progress Tracking**: Real-time deletion progress with detailed logging
+
+## 📊 Screenshot
+
+![Application screenshoot](https://github.com/LMLK-seal/WindowsNuke/blob/main/Screenshot.jpg?raw=true)
 
 ## 🚀 Installation
 
