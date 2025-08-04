@@ -64,7 +64,7 @@ pip install customtkinter psutil
 ### Quick Setup
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/WindowsNuke.git
+   git clone https://github.com/LMLK-seal/WindowsNuke.git
    cd WindowsNuke
    ```
 
