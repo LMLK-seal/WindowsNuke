@@ -6,6 +6,8 @@ import ctypes
 import subprocess
 import threading
 import tkinter.messagebox as messagebox
+import stat
+import errno
 
 # Define the folders typically associated with a Windows installation
 WINDOWS_FOLDERS = [
@@ -30,14 +32,13 @@ class WindowsRemoverApp(ctk.CTk):
 
         # --- Basic App Configuration ---
         self.title("WindowsNuke - Windows Remover tool")
-        self.geometry("700x650")
+        self.geometry("700x750")
         self.resizable(False, False)
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
-        self.found_folders = []
-        self.found_files = []
-        self.total_size_gb = 0.0
+        self.scan_results = {} # Use a dictionary for easier size lookups
+        self.selected_size_gb = 0.0
         self.selected_drive = None
 
         # --- Check for Admin Privileges ---
@@ -84,19 +85,40 @@ class WindowsRemoverApp(ctk.CTk):
         # 3. Results Display Frame
         results_frame = ctk.CTkFrame(self)
         results_frame.grid(row=2, column=0, padx=20, pady=10, sticky="nsew")
-        results_frame.grid_rowconfigure(0, weight=1)
         results_frame.grid_columnconfigure(0, weight=1)
+        results_frame.grid_rowconfigure(1, weight=1)
+
+        selection_helper_frame = ctk.CTkFrame(results_frame, fg_color="transparent")
+        selection_helper_frame.grid(row=0, column=0, padx=10, pady=(10, 0), sticky="ew")
         
-        self.results_textbox = ctk.CTkTextbox(results_frame, state="disabled", font=ctk.CTkFont(family="Consolas", size=12))
-        self.results_textbox.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        results_label = ctk.CTkLabel(selection_helper_frame, text="Scan Results: Check items to delete", font=ctk.CTkFont(weight="bold"))
+        results_label.pack(side="left")
 
-        # 4. Action Frame
-        action_frame = ctk.CTkFrame(self)
-        action_frame.grid(row=3, column=0, padx=20, pady=10, sticky="ew")
-        action_frame.grid_columnconfigure(0, weight=1)
+        self.deselect_all_button = ctk.CTkButton(selection_helper_frame, text="Deselect All", width=100, command=self.deselect_all, state="disabled")
+        self.deselect_all_button.pack(side="right", padx=(5,0))
+        
+        self.select_all_button = ctk.CTkButton(selection_helper_frame, text="Select All", width=100, command=self.select_all, state="disabled")
+        self.select_all_button.pack(side="right")
+        
+        self.scrollable_results_frame = ctk.CTkScrollableFrame(results_frame, label_text="")
+        self.scrollable_results_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        self.scrollable_results_frame.grid_columnconfigure(1, weight=1)
 
-        self.delete_button = ctk.CTkButton(action_frame, text="DELETE Found Files & Folders", command=self.start_delete_thread, fg_color="red", hover_color="darkred", state="disabled")
-        self.delete_button.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        # 4. Action & Progress Frame
+        self.action_frame = ctk.CTkFrame(self)
+        self.action_frame.grid(row=3, column=0, padx=20, pady=10, sticky="ew")
+        self.action_frame.grid_columnconfigure(0, weight=1) # Makes progress bar expand
+
+        # --- Action Widgets (visible by default) ---
+        self.delete_button = ctk.CTkButton(self.action_frame, text="DELETE Selected Files & Folders", command=self.start_delete_thread, fg_color="red", hover_color="darkred", state="disabled")
+        self.delete_button.grid(row=0, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.selected_size_label = ctk.CTkLabel(self.action_frame, text="Selected Size: 0.00 GB", anchor="e")
+        self.selected_size_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
+
+        # --- Progress Widgets (hidden by default) ---
+        self.progress_label = ctk.CTkLabel(self.action_frame, text="Deleting...", anchor="w")
+        self.progress_bar = ctk.CTkProgressBar(self.action_frame)
+        self.progress_bar.set(0)
 
         # 5. Status Bar
         self.status_label = ctk.CTkLabel(self, text="Please select a drive to begin.", anchor="w")
@@ -104,45 +126,67 @@ class WindowsRemoverApp(ctk.CTk):
 
 
     def is_admin(self):
-        """Check if the script is running with administrator privileges."""
         try:
             return ctypes.windll.shell32.IsUserAnAdmin()
         except:
             return False
 
     def get_available_drives(self):
-        """Get a list of non-system drives."""
         drives = []
         system_drive = os.getenv('SystemDrive', 'C:').upper()
         for part in psutil.disk_partitions():
-            if part.fstype and 'rw' in part.opts: # Check if it's a writable partition
+            if part.fstype and 'rw' in part.opts:
                 if part.mountpoint.upper() != system_drive.upper():
                     drives.append(part.mountpoint)
         return drives
 
     def on_drive_select(self, drive):
-        """Enable scan button when a valid drive is selected."""
         self.selected_drive = drive
         self.scan_button.configure(state="normal")
         self.status_label.configure(text=f"Drive {drive} selected. Ready to scan.")
-        self.results_textbox.configure(state="normal")
-        self.results_textbox.delete("1.0", "end")
-        self.results_textbox.configure(state="disabled")
+        self.clear_results_frame()
+        self.scan_results = {}
+        self.update_selection_totals()
         self.delete_button.configure(state="disabled")
 
+    def clear_results_frame(self):
+        for widget in self.scrollable_results_frame.winfo_children():
+            widget.destroy()
+
     def update_status(self, message):
-        """Thread-safe way to update the status label."""
         self.status_label.configure(text=message)
 
-    def update_results(self, content):
-        """Thread-safe way to update the results textbox."""
-        self.results_textbox.configure(state="normal")
-        self.results_textbox.delete("1.0", "end")
-        self.results_textbox.insert("1.0", content)
-        self.results_textbox.configure(state="disabled")
+    def select_all(self):
+        for item in self.scan_results.values():
+            item['checkbox_var'].set(True)
+        self.update_selection_totals()
+
+    def deselect_all(self):
+        for item in self.scan_results.values():
+            item['checkbox_var'].set(False)
+        self.update_selection_totals()
+
+    def update_selection_totals(self):
+        total_bytes = 0
+        selected_count = 0
+        for item in self.scan_results.values():
+            if item['checkbox_var'].get():
+                total_bytes += item['size_bytes']
+                selected_count += 1
         
+        self.selected_size_gb = total_bytes / (1024**3)
+        self.selected_size_label.configure(text=f"Selected Size: {self.selected_size_gb:.2f} GB")
+
+        self.delete_button.configure(state="normal" if selected_count > 0 else "disabled")
+        
+        if self.scan_results:
+            self.select_all_button.configure(state="normal")
+            self.deselect_all_button.configure(state="normal")
+        else:
+            self.select_all_button.configure(state="disabled")
+            self.deselect_all_button.configure(state="disabled")
+
     def get_folder_size(self, path):
-        """Recursively get folder size, ignoring permission errors."""
         total_size = 0
         try:
             for dirpath, _, filenames in os.walk(path):
@@ -152,130 +196,185 @@ class WindowsRemoverApp(ctk.CTk):
                         try:
                             total_size += os.path.getsize(fp)
                         except OSError:
-                            continue # Skip files we can't access
+                            continue
         except PermissionError:
             self.update_status(f"Warning: Permission denied for parts of {path}. Size may be inaccurate.")
         return total_size
 
+    def handle_remove_readonly(self, func, path, exc_info):
+        excvalue = exc_info[1]
+        if func in (os.rmdir, os.remove, os.unlink) and excvalue.errno == errno.EACCES:
+            os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            func(path)
+        else:
+            raise
+
     # --- Threaded Operations ---
 
     def start_scan_thread(self):
-        """Starts the scanning process in a new thread to avoid freezing the GUI."""
         self.scan_button.configure(state="disabled")
         self.delete_button.configure(state="disabled")
+        self.clear_results_frame()
+        self.scan_results = {}
+        self.update_selection_totals()
         self.update_status(f"Scanning {self.selected_drive} for Windows installation... This may take a while.")
         
         thread = threading.Thread(target=self.scan_drive, daemon=True)
         thread.start()
 
     def scan_drive(self):
-        """The actual scanning logic that runs in a thread."""
         drive = self.selected_drive
-        self.found_folders = []
-        self.found_files = []
-        self.total_size_gb = 0.0
+        temp_scan_results = []
         
-        # Check for a key Windows folder to confirm it's likely a Windows drive
         if not os.path.exists(os.path.join(drive, "Windows", "System32")):
             self.after(0, self.update_status, f"Error: No Windows installation found on {drive}.")
-            self.after(0, self.update_results, f"Scan failed.\nThe drive {drive} does not appear to contain a Windows installation.\nCould not find '{os.path.join(drive, 'Windows', 'System32')}'.")
+            self.after(0, lambda: messagebox.showerror("Scan Failed", f"The drive {drive} does not appear to contain a Windows installation."))
             self.after(0, self.scan_button.configure, {"state": "normal"})
             return
 
-        # Scan for target folders
-        results_text = f"Scan Results for Drive {drive}\n"
-        results_text += "--------------------------------\n\n"
-        results_text += "Found Folders to be Deleted:\n"
-        total_bytes = 0
+        all_items = [(f, "folder") for f in WINDOWS_FOLDERS] + [(f, "file") for f in WINDOWS_ROOT_FILES]
 
-        for folder in WINDOWS_FOLDERS:
-            path = os.path.join(drive, folder)
+        for name, item_type in all_items:
+            path = os.path.join(drive, name)
             self.after(0, self.update_status, f"Scanning: {path}...")
             if os.path.exists(path):
-                size_bytes = self.get_folder_size(path)
-                if size_bytes > 0:
-                    size_gb = size_bytes / (1024**3)
-                    total_bytes += size_bytes
-                    self.found_folders.append(path)
-                    results_text += f"- {path:<40} {size_gb:.2f} GB\n"
-        
-        results_text += "\nFound Root Files to be Deleted:\n"
-        for file in WINDOWS_ROOT_FILES:
-             path = os.path.join(drive, file)
-             if os.path.exists(path):
-                try:
-                    size_bytes = os.path.getsize(path)
-                    size_gb = size_bytes / (1024**3)
-                    total_bytes += size_bytes
-                    self.found_files.append(path)
-                    results_text += f"- {path:<40} {size_gb:.2f} GB\n"
-                except OSError:
-                    continue
+                size_bytes = 0
+                if item_type == "folder":
+                    size_bytes = self.get_folder_size(path)
+                else:
+                    try:
+                        size_bytes = os.path.getsize(path)
+                    except OSError:
+                        continue
+                
+                # Only add if size > 0 or it's the Recycle Bin which is often 0
+                if size_bytes > 0 or "$Recycle.Bin" in name:
+                    temp_scan_results.append({'path': path, 'size_bytes': size_bytes})
 
-        self.total_size_gb = total_bytes / (1024**3)
-        results_text += "\n--------------------------------\n"
-        results_text += f"Total space to be reclaimed: {self.total_size_gb:.2f} GB\n\n"
+        self.after(0, self.display_scan_results, temp_scan_results)
+
+    def display_scan_results(self, results):
+        self.clear_results_frame()
+        self.scan_results = {}
+
+        if not results:
+            self.update_status(f"Scan complete. No Windows files found on {self.selected_drive}.")
+            ctk.CTkLabel(self.scrollable_results_frame, text="No Windows-related folders or files found.").pack(padx=10, pady=10)
+            self.scan_button.configure(state="normal")
+            return
+
+        users_folder_found = any('Users' == os.path.basename(item['path']) for item in results)
+        if users_folder_found:
+            warning_label = ctk.CTkLabel(self.scrollable_results_frame, text="⚠️ WARNING: 'Users' folder contains personal data. Deselect to keep it.", text_color="orange")
+            warning_label.grid(row=0, column=0, columnspan=3, padx=5, pady=5, sticky="w")
         
-        if not self.found_folders and not self.found_files:
-            results_text += "No Windows-related folders or files found."
-            self.after(0, self.update_status, f"Scan complete. No Windows files found on {drive}.")
+        for i, item in enumerate(results):
+            row_index = i + 1 if users_folder_found else i
+            path = item['path']
+
+            self.scan_results[path] = {
+                'size_bytes': item['size_bytes'],
+                'checkbox_var': ctk.BooleanVar(value=True)
+            }
+            # Uncheck Users folder by default for safety
+            if os.path.basename(path) == 'Users':
+                self.scan_results[path]['checkbox_var'].set(False)
+
+            checkbox = ctk.CTkCheckBox(self.scrollable_results_frame, text="", variable=self.scan_results[path]['checkbox_var'], command=self.update_selection_totals)
+            checkbox.grid(row=row_index, column=0, padx=(5,0), pady=2, sticky="w")
+            path_label = ctk.CTkLabel(self.scrollable_results_frame, text=path, anchor="w")
+            path_label.grid(row=row_index, column=1, padx=5, pady=2, sticky="ew")
+            size_gb = item['size_bytes'] / (1024**3)
+            size_label = ctk.CTkLabel(self.scrollable_results_frame, text=f"{size_gb:.2f} GB", anchor="e", font=ctk.CTkFont(family="Consolas"))
+            size_label.grid(row=row_index, column=2, padx=5, pady=2, sticky="e")
+
+        self.update_status("Scan complete. Review the files below before deleting.")
+        self.scan_button.configure(state="normal")
+        self.update_selection_totals()
+
+    def switch_to_progress_view(self, show_progress=True):
+        """Switches the action frame between delete button and progress bar."""
+        if show_progress:
+            self.delete_button.grid_remove()
+            self.selected_size_label.grid_remove()
+            self.progress_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+            self.progress_bar.grid(row=0, column=1, columnspan=2, padx=10, pady=10, sticky="ew")
         else:
-            results_text += "WARNING: The 'Users' folder will be deleted. Ensure you have backed up all personal data from it."
-            self.after(0, self.update_status, "Scan complete. Review the files below before deleting.")
-            self.after(0, self.delete_button.configure, {"state": "normal"})
-
-        self.after(0, self.update_results, results_text)
-        self.after(0, self.scan_button.configure, {"state": "normal"})
+            self.progress_label.grid_remove()
+            self.progress_bar.grid_remove()
+            self.delete_button.grid(row=0, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+            self.selected_size_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
+            self.update_selection_totals()
 
     def start_delete_thread(self):
-        """Confirms and starts the deletion process in a thread."""
-        if not messagebox.askyesno("FINAL CONFIRMATION",
-            f"You are about to permanently delete {self.total_size_gb:.2f} GB of data from drive {self.selected_drive}.\n\n"
-            "This includes folders like 'Windows' and 'Users'.\n\n"
-            "THIS ACTION CANNOT BE UNDONE. Are you absolutely sure?"):
+        if self.selected_size_gb == 0:
+            messagebox.showwarning("No Selection", "No files or folders are selected for deletion.")
+            return
+
+        if not messagebox.askyesno("FINAL CONFIRMATION", f"You are about to permanently delete {self.selected_size_gb:.2f} GB of data from drive {self.selected_drive}.\n\nTHIS ACTION CANNOT BE UNDONE.\n\nAre you absolutely sure?"):
             return
             
         self.scan_button.configure(state="disabled")
-        self.delete_button.configure(state="disabled")
         self.drives_menu.configure(state="disabled")
+        self.select_all_button.configure(state="disabled")
+        self.deselect_all_button.configure(state="disabled")
+        self.switch_to_progress_view(True)
 
         thread = threading.Thread(target=self.delete_files, daemon=True)
         thread.start()
 
     def delete_files(self):
-        """The actual deletion logic."""
-        all_paths = self.found_folders + self.found_files
-        for i, path in enumerate(all_paths):
-            self.after(0, self.update_status, f"Deleting ({i+1}/{len(all_paths)}): {os.path.basename(path)}...")
-            try:
-                # Forcing permissions is crucial for system folders
-                # 1. Take ownership
-                subprocess.run(['takeown', '/F', path, '/R', '/D', 'Y'], check=True, capture_output=True)
-                # 2. Grant full control to the current user
-                subprocess.run(['icacls', path, '/grant', f'{os.getlogin()}:F', '/T'], check=True, capture_output=True)
-                
-                if os.path.isdir(path):
-                    shutil.rmtree(path)
-                elif os.path.isfile(path):
-                    os.remove(path)
-                
-                self.after(0, self.update_status, f"Successfully deleted {os.path.basename(path)}.")
+        paths_to_delete = [path for path, item in self.scan_results.items() if item['checkbox_var'].get()]
+        total_bytes_to_delete = sum(self.scan_results[path]['size_bytes'] for path in paths_to_delete)
+        bytes_deleted = 0
 
-            except (subprocess.CalledProcessError, OSError, PermissionError) as e:
-                error_message = f"ERROR: Failed to delete {path}. Reason: {str(e)}. Some files may remain. It's safer to format the drive."
-                self.after(0, self.update_status, error_message)
-                self.after(0, lambda: messagebox.showerror("Deletion Error", error_message))
-                # Re-enable controls after error
-                self.after(0, self.scan_button.configure, {"state": "normal"})
-                self.after(0, self.drives_menu.configure, {"state": "normal"})
-                return # Stop the process
+        try:
+            for i, path in enumerate(paths_to_delete):
+                self.after(0, self.update_status, f"Taking ownership of {os.path.basename(path)}...")
+                try:
+                    # FIX: Use shell=True and quotes to handle paths with spaces
+                    takeown_cmd = f'takeown /F "{path}" /R /D Y'
+                    icacls_cmd = f'icacls "{path}" /grant "{os.getlogin()}:F" /T'
+                    subprocess.run(takeown_cmd, check=True, capture_output=True, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    subprocess.run(icacls_cmd, check=True, capture_output=True, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    
+                    self.after(0, self.update_status, f"Deleting ({i+1}/{len(paths_to_delete)}): {os.path.basename(path)}...")
+                    if os.path.isdir(path):
+                        shutil.rmtree(path, onerror=self.handle_remove_readonly)
+                    elif os.path.isfile(path):
+                        os.chmod(path, stat.S_IWRITE)
+                        os.remove(path)
+                    
+                    # Update progress based on size
+                    item_size = self.scan_results[path]['size_bytes']
+                    bytes_deleted += item_size
+                    progress = bytes_deleted / total_bytes_to_delete if total_bytes_to_delete > 0 else 1
+                    deleted_gb = bytes_deleted / (1024**3)
+                    total_gb = total_bytes_to_delete / (1024**3)
 
-        final_message = f"Deletion process completed on drive {self.selected_drive}. Reclaimed approximately {self.total_size_gb:.2f} GB."
-        self.after(0, self.update_status, final_message)
-        self.after(0, self.update_results, final_message + "\nYou can now close the program.")
-        self.after(0, lambda: messagebox.showinfo("Success", final_message))
-        self.after(0, self.drives_menu.configure, {"state": "normal"})
+                    self.after(0, self.progress_bar.set, progress)
+                    self.after(0, self.progress_label.configure, {"text": f"Deleted: {deleted_gb:.2f} / {total_gb:.2f} GB"})
 
+                except (subprocess.CalledProcessError, OSError, PermissionError) as e:
+                    error_detail = e.stderr.decode('utf-8', errors='ignore').strip() if hasattr(e, 'stderr') and e.stderr else str(e)
+                    error_message = f"ERROR: Failed to delete {os.path.basename(path)}. Reason: {error_detail}"
+                    self.after(0, self.update_status, error_message)
+                    self.after(0, lambda: messagebox.showerror("Deletion Error", error_message + "\n\nSome files may remain. It's safer to format the drive."))
+                    return # Stop the process
+
+            final_message = f"Deletion complete. Reclaimed approx. {self.selected_size_gb:.2f} GB."
+            self.after(0, self.update_status, final_message)
+            self.after(0, self.clear_results_frame)
+            self.after(0, lambda: ctk.CTkLabel(self.scrollable_results_frame, text=final_message + "\nYou can now close the program.").pack(padx=10, pady=10))
+            self.after(0, lambda: messagebox.showinfo("Success", final_message))
+
+        finally:
+            # Always restore the UI state, even on error
+            self.after(0, self.scan_button.configure, {"state": "normal"})
+            self.after(0, self.drives_menu.configure, {"state": "normal"})
+            self.after(0, self.switch_to_progress_view, False)
+            self.after(0, self.scan_results.clear)
+            self.after(0, self.update_selection_totals)
 
 if __name__ == "__main__":
     app = WindowsRemoverApp()
